@@ -1,10 +1,53 @@
-﻿clear
+﻿#********************************************************
+#Parameters - Used to script setup if desired
+#********************************************************
+[CmdletBinding()]
+Param(
+        [Parameter()] [string]$SearchBase,
+        [Parameter()] [string]$DictionaryFile,
+        [Parameter()] [string]$IndexFile
+    )
 
 #********************************************************
 #Constants
 #********************************************************
-$ConfigFile="$PSScriptRoot\config.psd1"
-$IndexPrecision=4 #This needs to match the precision useds in the 
+$ScriptFile = "$PSScriptRoot\pwn-Patch.ps1"
+$ConfigFile = "$PSScriptRoot\Config.xml"
+
+# ****Default Message Body Blocks****
+$DefaultUserMessage = @"
+    <font style="font-size: 14pt">Your password is weak or common and you are required to change it.</font><br>
+    <font style="font-size: 10pt"><br>
+    <i><b><u>IMPORTANT:</u> The IT department will never ask you for your password.</b></i><br>
+    <br>
+    Hello [displayname],
+    The IT department periodically scans your account to ensure you are using a strong password. You can be assured that IT does not know your password, but we do know that your password is among a list of weak, common, or exploited passwords.  We compared your password with a list of common user passwords on the internet and discovered that your password was listed [occurrences] time(s).<br>
+    <br>
+    We kindly request you change your password.  Your password will be set to expire: <b>[expiration]</b><br>
+    <br>
+    Please consider these guidelines when selecting a password to create a strong password:
+    <ul>
+    <li>Use passphrase with a few words, instead of simple passwords
+    <li>Use as much of the keyboard as possible
+    <li>Do not use easily guessed words, such as &ldquo;password&rdquo;, &ldquo;123456&rdquo;
+    <li>Do not use keyboard patterns, such as &ldquo;qwerty&rdquo;, &ldquo;asdzxc&rdquo;, &ldquo;123456&rdquo;
+    <li>Do not use names, including family names, company names, street names
+    <li>Do not use private information such as SIN, Birth date, Anniversary, Phone Numbers
+    <li>Do not use passwords that you have used on internet websites
+    </ul>
+    <br>
+    <i>If you have more questions about this process, please contact IT support.</i><br></font>
+"@
+
+$DefaultAdminMessage=@"
+    <font style="font-size: 14pt">One or more of your end users has been found using a weak password.</font><br>
+    <font style="font-size: 10pt"><br>
+    <b>[userlist]</i></b>
+    <br>
+    The IT department periodically scans employee's account to ensure they are using a strong passwords by comparing the users password against a list of known breached passwords provided by haveibeenpwned.com.  The users password has never been sent anywhere and there is no record of the users password.<br>
+"@
+
+clear
 
 #********************************************************
 #Check if DSInternals is installed.  If not - Install it!
@@ -21,9 +64,9 @@ If ((Get-InstalledModule -Name "DSInternals" -MinimumVersion 4.0 -ErrorAction Si
         Write-Host "Please Run the script with Administrative Privilages to allow for the installation of DSInterals" -ForegroundColor Red
         Write-Host
         Write-Host "[EXITING]" -ForegroundColor Red
-        return;
+        return
     }
-    Install-Module DSInternals
+    Install-Module -Name DSInternals
     If ((Get-InstalledModule -Name "DSInternals" -MinimumVersion 4.0 -ErrorAction SilentlyContinue))  {
         write-host "[Installed]" -ForegroundColor Green
     } else {
@@ -31,28 +74,52 @@ If ((Get-InstalledModule -Name "DSInternals" -MinimumVersion 4.0 -ErrorAction Si
         Write-Host "Please correct the issue and try again" -ForegroundColor Red
         Write-Host
         Write-Host "[EXITING]" -ForegroundColor Red
-        return;
+        return
     }
 }
 
-
 #********************************************************
 #Load the configuration file - If it exists
-#           .\config.psd1
+#           $SettingsFile = "$PSScriptRoot\Config.xml"
 #It contains the location of the dictionary, index, and basic settings
 #********************************************************
-Write-Host
-Write-Host "PREVIOUS CONFIGURATION" -BackgroundColor White -ForegroundColor Black
-if (Test-Path $ConfigFile -ErrorAction SilentlyContinue) {
-    Write-Host "Configuration Loaded" -ForegroundColor Green
-    $Config=Import-PowerShellDataFile -Path $ConfigFile
-} else {
-    Write-Host "Configuration Doesn't exist" -ForegroundColor Red
-    $Config=@{}
+$isConfigFileMissing=(-not (Test-Path -Path $ConfigFile))
+if (-not $isConfigFileMissing) {
+    [xml]$Config = Get-Content $ConfigFile
+} else { 
+    [xml]$Config = New-Object System.XML.XMLDocument
 }
-$SearchBase=[string]$Config.SearchBase
-$DictionaryFile=[string]$Config.DictionaryFile
-$IndexFile=[string]$Config.IndexFile
+# ****Create Missing XML Tree Elements****
+if ($Config.Config -eq $null)                                  { $Config.AppendChild($Config.CreateElement("Config")) | Out-Null }
+if ($Config.Config.MailServer -eq $null)                       { $Config.SelectNodes("Config").AppendChild($Config.CreateElement("MailServer")) | Out-Null }
+if ($Config.Config.Notification -eq $null)                     { $Config.SelectNodes("Config").AppendChild($Config.CreateElement("Notification")) | Out-Null }
+if ($Config.Config.Notification.User -eq $null)                { $Config.SelectNodes("Config/Notification").AppendChild($Config.CreateElement("User")) | Out-Null }
+if ($Config.Config.Notification.Admin -eq $null)               { $Config.SelectNodes("Config/Notification").AppendChild($Config.CreateElement("Admin")) | Out-Null }
+
+# ****Set Missing XML Values to Default Values****
+if ($Config.Config.SearchBase -eq $null)                       { $Config.SelectNodes("Config").SetAttribute(                    "SearchBase",     "OU=Organizational Unit,DC=Domain,DC=com") }
+if ($Config.Config.DictionaryFile -eq $null)                   { $Config.SelectNodes("Config").SetAttribute(                    "DictionaryFile", "$PSScriptRoot\pwned-passwords-ntlm-ordered-by-hash-v5.txt") }
+if ($Config.Config.IndexFile -eq $null)                        { $Config.SelectNodes("Config").SetAttribute(                    "IndexFile",      "$PSScriptRoot\Config.xml") }
+if ($Config.Config.EventsFile -eq $null)                       { $Config.SelectNodes("Config").SetAttribute(                    "EventFile",      "$PSScriptRoot\Failures.csv") }
+if ($Config.Config.MailServer.Address -eq $null)               { $Config.SelectNodes("Config/MailServer").SetAttribute(         "Address",        "smtp.company.com") }
+if ($Config.Config.MailServer.Port -eq $null)                  { $Config.SelectNodes("Config/MailServer").SetAttribute(         "Port",           "25") }
+if ($Config.Config.MailServer.SSL -eq $null)                   { $Config.SelectNodes("Config/MailServer").SetAttribute(         "SSL",            "false") }
+if ($Config.Config.Notification.User.Enabled -eq $null)        { $Config.SelectNodes("Config/Notification/User").SetAttribute(  "Threshold",      "1") }
+if ($Config.Config.Notification.User.Threshold -eq $null)      { $Config.SelectNodes("Config/Notification/User").SetAttribute(  "Threshold",      "1") }
+if ($Config.Config.Notification.User.ExpirePassword -eq $null) { $Config.SelectNodes("Config/Notification/User").SetAttribute(  "ExpirePassword", "true") }
+if ($Config.Config.Notification.User.ExpireHours -eq $null)    { $Config.SelectNodes("Config/Notification/User").SetAttribute(  "ExpireHours",    "24") }
+if ($Config.Config.Notification.User.FromAddress -eq $null)    { $Config.SelectNodes("Config/Notification/User").SetAttribute(  "FromAddress",    "itsupport@company.com") }
+<# This Parameter is not needed and is ignored #>                $Config.SelectNodes("Config/Notification/User").SetAttribute(  "ToAddress",      "[End User]") 
+if ($Config.Config.Notification.User.Subject -eq $null)        { $Config.SelectNodes("Config/Notification/User").SetAttribute(  "Subject",        "[Password Stength Monitor] Action Required: Your password is too weak") }
+if ($Config.Config.Notification.User.MsgBodyFile -eq $null)    { $Config.SelectNodes("Config/Notification/User").SetAttribute(  "MsgBodyFile",    "$PSScriptRoot\AdminMessage.html") }
+if ($Config.Config.Notification.Admin.Threshold -eq $null)     { $Config.SelectNodes("Config/Notification/Admin").SetAttribute( "Threshold",      "1") }
+<# This Parameter is not needed and is ignored #>                $Config.SelectNodes("Config/Notification/Admin").SetAttribute( "ExpirePassword", "false")
+<# This Parameter is not needed and is ignored #>                $Config.SelectNodes("Config/Notification/Admin").SetAttribute( "ExpireHours",    "-")
+if ($Config.Config.Notification.Admin.FromAddress -eq $null)   { $Config.SelectNodes("Config/Notification/Admin").SetAttribute( "FromAddress",    "noreply@company.com") }
+if ($Config.Config.Notification.Admin.ToAddress -eq $null)     { $Config.SelectNodes("Config/Notification/Admin").SetAttribute( "ToAddress",      "itsupport@company.com") }
+if ($Config.Config.Notification.Admin.Subject -eq $null)       { $Config.SelectNodes("Config/Notification/Admin").SetAttribute( "Subject",        "[Password Stength Monitor] An end user has been found using a weak password") }
+if ($Config.Config.Notification.Admin.MsgBodyFile -eq $null)   { $Config.SelectNodes("Config/Notification/Admin").SetAttribute( "MsgBodyFile",    "$PSScriptRoot\AdminMessage.html") }
+
 
 
 #********************************************************
@@ -61,34 +128,13 @@ $IndexFile=[string]$Config.IndexFile
 #********************************************************
 Write-Host
 Write-Host "SEARCH BASE" -BackgroundColor White -ForegroundColor Black
-Write-Host "Please enter the location of your users" -ForegroundColor Yellow
-Write-Host "Example: OU=Users,DC=Domain,DC=com" -ForegroundColor Yellow
-If ($SearchBase -ne "") {
-    $NewSearchBase=Read-Host "Search Base [$SearchBase]"
-} else {
-    $NewSearchBase=Read-Host "Search Base"
+if (-not $SearchBase) {
+    Write-Host "Please enter the location of your users in Active Directory" -ForegroundColor Yellow
+    Write-Host "  Example: OU=Users,DC=Domain,DC=com" -ForegroundColor Yellow
+    $SearchBase=Read-Host "Search Base [$($Config.Config.SearchBase)]"
 }
-if ($NewSearchBase -eq "") {$NewSearchBase=$SearchBase}
-if ($NewSearchBase -eq "") {
-    Write-Host "User Cancled" -ForegroundColor Red
-    Write-Host
-    Write-Host "[EXITING]" -ForegroundColor Red
-    return
-}
-If ($NewSearchBase -like $SearchBase) {
-    Write-Host "Search Base left unchanged" -ForegroundColor Green
-} else {
-    Write-Host "Search Base changed to: $NewSearchBase" -ForegroundColor Green
-}
-$SearchBase=$NewSearchBase
-
-
-#********************************************************
-#Get the domain and OU of where the user accounts are
-#Example: OU=Users,DC=Domain,DC=com
-#*******************************************************
-Write-Host
-Write-Host "BASIC OPTIONS" -BackgroundColor White -ForegroundColor Black
+if ($SearchBase -ne "") { $Config.Config.SearchBase = $SearchBase}
+write-host "Selected Value: $($Config.Config.SearchBase)"
 
 
 #********************************************************
@@ -97,36 +143,44 @@ Write-Host "BASIC OPTIONS" -BackgroundColor White -ForegroundColor Black
 #********************************************************
 Write-Host
 Write-Host "DICTIONARY FILE" -BackgroundColor White -ForegroundColor Black
-if ($DictionaryFile -ne "") {
-    Write-Host "Password Dictionary File is currently set to: $DictionaryFile" -ForegroundColor Green
-    if (-not (Test-Path $DictionaryFile -ErrorAction SilentlyContinue)) {
-        Write-Host "File no longer exists" -ForegroundColor Red
-        $DictionaryFile=""
+if (-not $DictionaryFile) {
+    Write-Host "Please select the location of your Dictionary File" -ForegroundColor Yellow
+    Write-Host "    This is downloaded from: https://haveibeenpwned.com/Passwords" -ForegroundColor Yellow
+    Write-Host "    Format: NTLM Format and Orderd by hash" -ForegroundColor Yellow
+    $OpenFileBrowser = New-Object System.Windows.Forms.OpenFileDialog -Property @{ 
+        Title="Ordered NTLM Password Dictionary from https://haveibeenpwned.com/Passwords"
+        Filter = 'Password Dictionary (*.txt)|*.txt|All Files (*.*)|*.*'
     }
-}
-$FileBrowser = New-Object System.Windows.Forms.OpenFileDialog -Property @{ 
-    Title="Ordered NTLM Password Dictionary from https://haveibeenpwned.com/Passwords"
-    InitialDirectory = $PSScriptRoot
-    Filter = 'Password Dictionary (*.txt)|*.txt|All Files (*.*)|*.*'
-}
-if ($DictionaryFile -ne "") {
-    $FileBrowser.InitialDirectory=Split-Path -Path $DictionaryFile -Parent
-    $FileBrowser.FileName=Split-Path -Path $DictionaryFile -Leaf
-}
-Write-Host "Prompting for location of the Password Dictionary" -ForegroundColor Yellow
-if ($FileBrowser.ShowDialog() -eq "OK") {
-    if ($DictionaryFile -like $FileBrowser.FileName) {
-        Write-Host "Dictionary File unchanged" -ForegroundColor Green
+    $Path = $Config.Config.DictionaryFile
+    While (-not (Test-Path -Path $Path))  {
+        $Path = Split-Path -Path $Path -Parent
+        if (-not $Path) { $Path = $PSScriptRoot }
+    }
+    if ((Get-Item -Path $Path) -is [System.IO.DirectoryInfo]) {
+        $OpenFileBrowser.InitialDirectory = $Path
+        $OpenFileBrowser.FileName=""
     } else {
-        Write-Host "Dictionary File changed to: $($FileBrowser.FileName)" -ForegroundColor Green
+        $OpenFileBrowser.InitialDirectory = Split-Path -Path $Path -Parent
+        $OpenFileBrowser.FileName=Split-Path -Path $Path -Leaf
     }
-    $DictionaryFile = $FileBrowser.FileName
+    if ($OpenFileBrowser.ShowDialog() -ne "OK") {
+        Write-Host "User Cancled" -ForegroundColor Red
+        Write-Host
+        Write-Host "[EXITING]" -ForegroundColor Red
+        return
+    }
+    $DictionaryFile = $OpenFileBrowser.FileName
 } else {
-    Write-Host "User Cancled" -ForegroundColor Red
-    Write-Host
-    Write-Host "[EXITING]" -ForegroundColor Red
-    return
-}
+    if (-not (Test-Path $DictionaryFile -ErrorAction SilentlyContinue)) {
+        Write-Host "Dictionary File doesn't exist" -ForegroundColor Red
+        Write-Host
+        Write-Host "[EXITING]" -ForegroundColor Red
+        return
+    } else {
+        Write-Host "Set to $DictionaryFile"
+    }
+}   
+$config.Config.DictionaryFile = $DictionaryFile
 
 
 #********************************************************
@@ -136,33 +190,42 @@ if ($FileBrowser.ShowDialog() -eq "OK") {
 #********************************************************
 Write-Host
 Write-Host "INDEX FILE" -BackgroundColor White -ForegroundColor Black
-if ($IndexFile -ne "") {
-    Write-Host "Index File is currently set to: $IndexFile" -ForegroundColor Green
-}
-$FileBrowser = New-Object System.Windows.Forms.SaveFileDialog -Property @{ 
-    Title="Index File"
-    InitialDirectory = $PSScriptRoot
-    Filter = 'Index File (*.index)|*.index|All Files (*.*)|*.*'
-}
-if ($IndexFile -ne "") {
-    $FileBrowser.InitialDirectory=Split-Path -Path $IndexFile -Parent
-    $FileBrowser.FileName=Split-Path -Path $IndexFile -Leaf
-}
-Write-Host "Prompting for location of the Index File" -ForegroundColor Yellow
-if ($FileBrowser.ShowDialog() -eq "OK") {
-    if ($IndexFile -like $FileBrowser.FileName) {
-        Write-Host "Index File unchanged" -ForegroundColor Green
-    } else {
-        Write-Host "Index File changed to: $($FileBrowser.FileName)" -ForegroundColor Green
+if (-not $IndexFile) {
+    Write-Host "Please select the location of your Password Dictionary Index File" -ForegroundColor Yellow
+    Write-Host "    The index file is used to speed up searches in the password dictionary" -ForegroundColor Yellow
+    $SaveFileBrowser = New-Object System.Windows.Forms.SaveFileDialog -Property @{ 
+        Title="Password Dictionary Index File"
+        Filter = 'Index File (*.csv)|*.csv|All Files (*.*)|*.*'
     }
-    $IndexFile = $FileBrowser.FileName
+    $Path = $Config.Config.IndexFile
+    Do  {
+        $Path = Split-Path -Path $Path -Parent
+        if (-not $Path) { $Path = $PSScriptRoot }
+    } Until (Test-Path -Path $Path)
+    if ((Get-Item -Path $Path) -is [System.IO.DirectoryInfo]) {
+        $SaveFileBrowser.InitialDirectory = Split-Path -Path $Path -Leaf
+        $SaveFileBrowser.FileName=""
+    } else {
+        $SaveFileBrowser.InitialDirectory = Split-Path -Path $Path -Parent
+        $SaveFileBrowser.FileName=Split-Path -Path $Path -Leaf
+    }
+    if ($SaveFileBrowser.ShowDialog() -ne "OK") {
+        Write-Host "User Cancled" -ForegroundColor Red
+        Write-Host
+        Write-Host "[EXITING]" -ForegroundColor Red
+        return
+    }
+    $IndexFile = $SaveFileBrowser.FileName
 } else {
-    Write-Host "User Cancled" -ForegroundColor Red
-    Write-Host
-    Write-Host "[EXITING]" -ForegroundColor Red
-    return
-}
-
+    if (-not (Test-Path $IndexFile -ErrorAction SilentlyContinue)) {
+        Write-Host "Index File doesn't exist" -ForegroundColor Red
+        Write-Host
+        Write-Host "[EXITING]" -ForegroundColor Red
+        return
+    }
+}   
+$config.Config.IndexFile = $IndexFile
+return;
 
 #********************************************************
 #Save the configuration file
